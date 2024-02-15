@@ -1,0 +1,13 @@
+---
+devices:
+  - id: ^0003:8808:660a.+$
+    keymap:
+      KEY_A: [KEY_UP, KEY_LEFT]
+      KEY_S: [KEY_UP]
+      KEY_D: [KEY_UP, KEY_RIGHT]
+      KEY_F: [KEY_LEFT]
+      KEY_G: [KEY_TAB]
+      KEY_H: [KEY_RIGHT]
+      KEY_J: [KEY_DOWN, KEY_LEFT]
+      KEY_K: [KEY_DOWN]
+      KEY_L: [KEY_DOWN, KEY_RIGHT]
