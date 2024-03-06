@@ -6,78 +6,123 @@ from evdev import categorize, ecodes, InputDevice, list_devices, UInput
 import re as regex
 import yaml
 
-DEFAULT_CONFIG = [{"id": "^.*$"}]
-DEFAULT_CONFIG_PATH = "config.yaml"
+CONFIG = {}
+CONFIG_DEFAULT = [
+    {
+        "id": "^.*$"
+    }
+]
+CONFIG_PATH_DEFAULT = "config.yaml"
+DEVICES = {}
 
 
 def log(line):
     print(datetime.utcnow(), "UTC", "-", line)
 
 
-async def key_event(device):
-    config = device["config"]
-    id = device["id"]
-    input = device["input"]
-    with UInput.from_device(input) as ui:
-        input.grab()
-        async for event in input.async_read_loop():
-            if event.type == ecodes.EV_KEY:
-                key = categorize(event)
-                keycode = key.keycode
-                keystate = key.keystate
-                keymap = config.get("keymap", {})
-                keymappeds = keymap.get(key.keycode, [])
-                log("device ({}) key event ({} > {}) {}".format(
-                    id,
-                    keycode,
-                    keymappeds,
-                    keystate
-                ))
-                for keymapped in keymappeds:
-                    keymappedcode = ecodes.ecodes[
-                        keymapped if keymapped else keycode
-                    ]
-                    ui.write(ecodes.EV_KEY, keymappedcode, keystate)
-                ui.syn()
-        input.ungrab()
+def load_configurations():
+    global CONFIG
+    try:
+        with open(CONFIG_PATH_DEFAULT, "r") as file:
+            CONFIG = yaml.safe_load(file)
+    except (AttributeError, ImportError, OSError):
+        CONFIG = CONFIG_DEFAULT
+    finally:
+        log("Loaded configuration: {}".format(CONFIG))
+
+
+def available_devices():
+    return list_devices()
+
+
+async def find_devices():
+    global DEVICES
+    for device in available_devices():
+        if device not in DEVICES:
+            input = InputDevice(device)
+            id = "{:04x}:{:04x}:{:04x}:{:04x}".format(
+                input.info.bustype,
+                input.info.vendor,
+                input.info.product,
+                input.info.version
+            )
+            for config in CONFIG:
+                if regex.search(config["id"], id):
+                    log("Found device: {} ({})".format(
+                        device,
+                        id
+                    ))
+                    DEVICES[device] = {
+                        "config": config,
+                        "device": device,
+                        "id": id,
+                        "input": input
+                    }
+
+
+async def remove_devices():
+    global DEVICES
+    devices = DEVICES.copy()
+    for device in devices:
+        if device not in available_devices():
+            log("Removed device: {} ({})".format(
+                device,
+                devices[device]["id"]
+            ))
+            DEVICES.pop(device)
+
+
+async def map_device_events(device):
+    devices = DEVICES.copy()
+    if devices[device].get("input"):
+        config = devices[device]["config"]
+        id = devices[device]["id"]
+        input = devices[device]["input"]
+        try:
+            with UInput.from_device(input) as ui:
+                input.grab()
+                async for event in input.async_read_loop():
+                    if event.type == ecodes.EV_KEY:
+                        key = categorize(event)
+                        keycodes = key.keycode
+                        keystate = key.keystate
+                        if not isinstance(keycodes, list):
+                            keycodes = [keycodes]
+                        keymaps = []
+                        for keycode in keycodes:
+                            keymaps += config.get("keymap", {}).get(keycode, keycode)
+                        for keymap in keymaps:
+                            keymapcode = ecodes.ecodes[keymap]
+                            ui.write(ecodes.EV_KEY, keymapcode, keystate)
+                        ui.syn()
+                        log("Event device: {} ({}) {} > {} {}".format(
+                            device,
+                            id,
+                            keycodes,
+                            keymaps,
+                            keystate
+                        ))
+                    else:
+                        pass
+                input.ungrab()
+        except OSError:
+            log("Missing device: {} ({})".format(
+                device,
+                id
+            ))
+            await remove_devices()
+
+
+async def handle_devices():
+    devices = DEVICES.copy()
+    for device in devices:
+        asyncio.create_task(map_device_events(device))
+
 
 if __name__ == "__main__":
-    matched_devices = []
-    try:
-        with open(DEFAULT_CONFIG_PATH, "r") as file:
-            config_devices = yaml.safe_load(file).get(
-                "devices",
-                DEFAULT_CONFIG
-            )
-    except AttributeError or ImportError as e:
-        config_devices = DEFAULT_CONFIG
-    available_devices = list_devices()
-    for available_device in available_devices:
-        available_input = InputDevice(available_device)
-        available_info = available_input.info
-        available_id = "{:04x}:{:04x}:{:04x}:{:04x}".format(
-            available_info.bustype,
-            available_info.vendor,
-            available_info.product,
-            available_info.version
-        )
-        for config_device in config_devices:
-            config_id = config_device["id"]
-            config_keymap = config_device.get("keymap", {})
-            if regex.search(config_id, available_id):
-                matched_devices += [{
-                    "config": config_device,
-                    "id": available_id,
-                    "input": available_input
-                }]
-    for matched_device in matched_devices:
-        log("device ({}) matched pattern ({})".format(
-            matched_device["id"],
-            matched_device["config"]["id"]
-        ))
-        asyncio.ensure_future(
-            key_event(matched_device)
-        )
-    if len(matched_devices) > 0:
-        loop = asyncio.get_event_loop()
-        loop.run_forever()
+    load_configurations()
+    asyncio.ensure_future(find_devices())
+    asyncio.ensure_future(remove_devices())
+    asyncio.ensure_future(handle_devices())
+    loop = asyncio.get_event_loop()
+    loop.run_forever()
